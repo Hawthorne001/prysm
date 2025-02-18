@@ -1,18 +1,23 @@
 package electra
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 
+	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/pkg/errors"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/helpers"
-	"github.com/prysmaticlabs/prysm/v5/beacon-chain/core/signing"
 	"github.com/prysmaticlabs/prysm/v5/beacon-chain/state"
+	state_native "github.com/prysmaticlabs/prysm/v5/beacon-chain/state/state-native"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
-	"github.com/prysmaticlabs/prysm/v5/crypto/bls"
-	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
+	"github.com/prysmaticlabs/prysm/v5/encoding/bytesutil"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing/trace"
+	enginev1 "github.com/prysmaticlabs/prysm/v5/proto/engine/v1"
+	eth "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 	"github.com/prysmaticlabs/prysm/v5/time/slots"
-	"go.opencensus.io/trace"
+	log "github.com/sirupsen/logrus"
 )
 
 // ProcessPendingConsolidations implements the spec definition below. This method makes mutating
@@ -20,66 +25,65 @@ import (
 //
 // Spec definition:
 //
-//	def process_pending_consolidations(state: BeaconState) -> None:
-//	    next_pending_consolidation = 0
-//	    for pending_consolidation in state.pending_consolidations:
-//	        source_validator = state.validators[pending_consolidation.source_index]
-//	        if source_validator.slashed:
-//	            next_pending_consolidation += 1
-//	            continue
-//	        if source_validator.withdrawable_epoch > get_current_epoch(state):
-//	            break
+// def process_pending_consolidations(state: BeaconState) -> None:
 //
-//	        # Churn any target excess active balance of target and raise its max
-//	        switch_to_compounding_validator(state, pending_consolidation.target_index)
-//	        # Move active balance to target. Excess balance is withdrawable.
-//	        active_balance = get_active_balance(state, pending_consolidation.source_index)
-//	        decrease_balance(state, pending_consolidation.source_index, active_balance)
-//	        increase_balance(state, pending_consolidation.target_index, active_balance)
+//	next_epoch = Epoch(get_current_epoch(state) + 1)
+//	next_pending_consolidation = 0
+//	for pending_consolidation in state.pending_consolidations:
+//	    source_validator = state.validators[pending_consolidation.source_index]
+//	    if source_validator.slashed:
 //	        next_pending_consolidation += 1
+//	        continue
+//	    if source_validator.withdrawable_epoch > next_epoch:
+//	        break
 //
-//	    state.pending_consolidations = state.pending_consolidations[next_pending_consolidation:]
+//	    # Calculate the consolidated balance
+//	    source_effective_balance = min(state.balances[pending_consolidation.source_index], source_validator.effective_balance)
+//
+//	    # Move active balance to target. Excess balance is withdrawable.
+//	    decrease_balance(state, pending_consolidation.source_index, source_effective_balance)
+//	    increase_balance(state, pending_consolidation.target_index, source_effective_balance)
+//	    next_pending_consolidation += 1
+//
+//	state.pending_consolidations = state.pending_consolidations[next_pending_consolidation:]
 func ProcessPendingConsolidations(ctx context.Context, st state.BeaconState) error {
-	ctx, span := trace.StartSpan(ctx, "electra.ProcessPendingConsolidations")
+	_, span := trace.StartSpan(ctx, "electra.ProcessPendingConsolidations")
 	defer span.End()
 
 	if st == nil || st.IsNil() {
 		return errors.New("nil state")
 	}
 
-	currentEpoch := slots.ToEpoch(st.Slot())
+	nextEpoch := slots.ToEpoch(st.Slot()) + 1
 
-	var nextPendingConsolidation uint64
 	pendingConsolidations, err := st.PendingConsolidations()
 	if err != nil {
 		return err
 	}
-
+	var nextPendingConsolidation uint64
 	for _, pc := range pendingConsolidations {
-		sourceValidator, err := st.ValidatorAtIndex(pc.SourceIndex)
+		sourceValidator, err := st.ValidatorAtIndexReadOnly(pc.SourceIndex)
 		if err != nil {
 			return err
 		}
-		if sourceValidator.Slashed {
+		if sourceValidator.Slashed() {
 			nextPendingConsolidation++
 			continue
 		}
-		if sourceValidator.WithdrawableEpoch > currentEpoch {
+		if sourceValidator.WithdrawableEpoch() > nextEpoch {
 			break
 		}
 
-		if err := SwitchToCompoundingValidator(ctx, st, pc.TargetIndex); err != nil {
-			return err
-		}
-
-		activeBalance, err := st.ActiveBalanceAtIndex(pc.SourceIndex)
+		validatorBalance, err := st.BalanceAtIndex(pc.SourceIndex)
 		if err != nil {
 			return err
 		}
-		if err := helpers.DecreaseBalance(st, pc.SourceIndex, activeBalance); err != nil {
+		b := min(validatorBalance, sourceValidator.EffectiveBalance())
+
+		if err := helpers.DecreaseBalance(st, pc.SourceIndex, b); err != nil {
 			return err
 		}
-		if err := helpers.IncreaseBalance(st, pc.TargetIndex, activeBalance); err != nil {
+		if err := helpers.IncreaseBalance(st, pc.TargetIndex, b); err != nil {
 			return err
 		}
 		nextPendingConsolidation++
@@ -92,167 +96,294 @@ func ProcessPendingConsolidations(ctx context.Context, st state.BeaconState) err
 	return nil
 }
 
-// ProcessConsolidations implements the spec definition below. This method makes mutating calls to
-// the beacon state.
+// ProcessConsolidationRequests implements the spec definition below. This method makes mutating
+// calls to the beacon state.
 //
-// Spec definition:
+//	def process_consolidation_request(
+//	    state: BeaconState,
+//	    consolidation_request: ConsolidationRequest
+//	) -> None:
+//	    if is_valid_switch_to_compounding_request(state, consolidation_request):
+//	        validator_pubkeys = [v.pubkey for v in state.validators]
+//	        request_source_pubkey = consolidation_request.source_pubkey
+//	        source_index = ValidatorIndex(validator_pubkeys.index(request_source_pubkey))
+//	        switch_to_compounding_validator(state, source_index)
+//	        return
 //
-//	def process_consolidation(state: BeaconState, signed_consolidation: SignedConsolidation) -> None:
-//	    # If the pending consolidations queue is full, no consolidations are allowed in the block
-//	    assert len(state.pending_consolidations) < PENDING_CONSOLIDATIONS_LIMIT
-//	    # If there is too little available consolidation churn limit, no consolidations are allowed in the block
-//	    assert get_consolidation_churn_limit(state) > MIN_ACTIVATION_BALANCE
-//	    consolidation = signed_consolidation.message
 //	    # Verify that source != target, so a consolidation cannot be used as an exit.
-//	    assert consolidation.source_index != consolidation.target_index
+//	    if consolidation_request.source_pubkey == consolidation_request.target_pubkey:
+//	        return
+//	    # If the pending consolidations queue is full, consolidation requests are ignored
+//	    if len(state.pending_consolidations) == PENDING_CONSOLIDATIONS_LIMIT:
+//	        return
+//	    # If there is too little available consolidation churn limit, consolidation requests are ignored
+//	    if get_consolidation_churn_limit(state) <= MIN_ACTIVATION_BALANCE:
+//	        return
 //
-//	    source_validator = state.validators[consolidation.source_index]
-//	    target_validator = state.validators[consolidation.target_index]
+//	    validator_pubkeys = [v.pubkey for v in state.validators]
+//	    # Verify pubkeys exists
+//	    request_source_pubkey = consolidation_request.source_pubkey
+//	    request_target_pubkey = consolidation_request.target_pubkey
+//	    if request_source_pubkey not in validator_pubkeys:
+//	        return
+//	    if request_target_pubkey not in validator_pubkeys:
+//	        return
+//	    source_index = ValidatorIndex(validator_pubkeys.index(request_source_pubkey))
+//	    target_index = ValidatorIndex(validator_pubkeys.index(request_target_pubkey))
+//	    source_validator = state.validators[source_index]
+//	    target_validator = state.validators[target_index]
+//
+//	    # Verify source withdrawal credentials
+//	    has_correct_credential = has_execution_withdrawal_credential(source_validator)
+//	    is_correct_source_address = (
+//	        source_validator.withdrawal_credentials[12:] == consolidation_request.source_address
+//	    )
+//	    if not (has_correct_credential and is_correct_source_address):
+//	        return
+//
+//	    # Verify that target has compounding withdrawal credentials
+//	    if not has_compounding_withdrawal_credential(target_validator):
+//	        return
+//
 //	    # Verify the source and the target are active
 //	    current_epoch = get_current_epoch(state)
-//	    assert is_active_validator(source_validator, current_epoch)
-//	    assert is_active_validator(target_validator, current_epoch)
+//	    if not is_active_validator(source_validator, current_epoch):
+//	        return
+//	    if not is_active_validator(target_validator, current_epoch):
+//	        return
 //	    # Verify exits for source and target have not been initiated
-//	    assert source_validator.exit_epoch == FAR_FUTURE_EPOCH
-//	    assert target_validator.exit_epoch == FAR_FUTURE_EPOCH
-//	    # Consolidations must specify an epoch when they become valid; they are not valid before then
-//	    assert current_epoch >= consolidation.epoch
+//	    if source_validator.exit_epoch != FAR_FUTURE_EPOCH:
+//	        return
+//	    if target_validator.exit_epoch != FAR_FUTURE_EPOCH:
+//	        return
 //
-//	    # Verify the source and the target have Execution layer withdrawal credentials
-//	    assert has_execution_withdrawal_credential(source_validator)
-//	    assert has_execution_withdrawal_credential(target_validator)
-//	    # Verify the same withdrawal address
-//	    assert source_validator.withdrawal_credentials[12:] == target_validator.withdrawal_credentials[12:]
+//	    # Verify the source has been active long enough
+//	    if current_epoch < source_validator.activation_epoch + SHARD_COMMITTEE_PERIOD:
+//	        return
 //
-//	    # Verify consolidation is signed by the source and the target
-//	    domain = compute_domain(DOMAIN_CONSOLIDATION, genesis_validators_root=state.genesis_validators_root)
-//	    signing_root = compute_signing_root(consolidation, domain)
-//	    pubkeys = [source_validator.pubkey, target_validator.pubkey]
-//	    assert bls.FastAggregateVerify(pubkeys, signing_root, signed_consolidation.signature)
-//
+//	    # Verify the source has no pending withdrawals in the queue
+//	    if get_pending_balance_to_withdraw(state, source_index) > 0:
+//	        return
 //	    # Initiate source validator exit and append pending consolidation
 //	    source_validator.exit_epoch = compute_consolidation_epoch_and_update_churn(
-//	        state, source_validator.effective_balance)
+//	        state, source_validator.effective_balance
+//	    )
 //	    source_validator.withdrawable_epoch = Epoch(
 //	        source_validator.exit_epoch + MIN_VALIDATOR_WITHDRAWABILITY_DELAY
 //	    )
 //	    state.pending_consolidations.append(PendingConsolidation(
-//	        source_index=consolidation.source_index,
-//	        target_index=consolidation.target_index
+//	        source_index=source_index,
+//	        target_index=target_index
 //	    ))
-func ProcessConsolidations(ctx context.Context, st state.BeaconState, cs []*ethpb.SignedConsolidation) error {
-	_, span := trace.StartSpan(ctx, "electra.ProcessConsolidations")
-	defer span.End()
-
-	if st == nil || st.IsNil() {
-		return errors.New("nil state")
+func ProcessConsolidationRequests(ctx context.Context, st state.BeaconState, reqs []*enginev1.ConsolidationRequest) error {
+	if len(reqs) == 0 || st == nil {
+		return nil
 	}
+	curEpoch := slots.ToEpoch(st.Slot())
+	ffe := params.BeaconConfig().FarFutureEpoch
+	minValWithdrawDelay := params.BeaconConfig().MinValidatorWithdrawabilityDelay
+	pcLimit := params.BeaconConfig().PendingConsolidationsLimit
 
-	if len(cs) == 0 {
-		return nil // Nothing to process.
-	}
-
-	domain, err := signing.ComputeDomain(
-		params.BeaconConfig().DomainConsolidation,
-		nil, // Use genesis fork version
-		st.GenesisValidatorsRoot(),
-	)
-	if err != nil {
-		return err
-	}
-
-	totalBalance, err := helpers.TotalActiveBalance(st)
-	if err != nil {
-		return err
-	}
-
-	if helpers.ConsolidationChurnLimit(primitives.Gwei(totalBalance)) <= primitives.Gwei(params.BeaconConfig().MinActivationBalance) {
-		return errors.New("too little available consolidation churn limit")
-	}
-
-	currentEpoch := slots.ToEpoch(st.Slot())
-
-	for _, c := range cs {
-		if c == nil || c.Message == nil {
-			return errors.New("nil consolidation")
+	for _, cr := range reqs {
+		if cr == nil {
+			return errors.New("nil consolidation request")
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("cannot process consolidation requests: %w", ctx.Err())
+		}
+		if IsValidSwitchToCompoundingRequest(st, cr) {
+			srcIdx, ok := st.ValidatorIndexByPubkey(bytesutil.ToBytes48(cr.SourcePubkey))
+			if !ok {
+				log.Error("failed to find source validator index")
+				continue
+			}
+			if err := SwitchToCompoundingValidator(st, srcIdx); err != nil {
+				log.WithError(err).Error("failed to switch to compounding validator")
+			}
+			continue
+		}
+		sourcePubkey := bytesutil.ToBytes48(cr.SourcePubkey)
+		targetPubkey := bytesutil.ToBytes48(cr.TargetPubkey)
+		if sourcePubkey == targetPubkey {
+			continue
 		}
 
-		if n, err := st.NumPendingConsolidations(); err != nil {
-			return err
-		} else if n >= params.BeaconConfig().PendingConsolidationsLimit {
-			return errors.New("pending consolidations queue is full")
+		if npc, err := st.NumPendingConsolidations(); err != nil {
+			return fmt.Errorf("failed to fetch number of pending consolidations: %w", err) // This should never happen.
+		} else if npc >= pcLimit {
+			return nil
 		}
 
-		if c.Message.SourceIndex == c.Message.TargetIndex {
-			return errors.New("source and target index are the same")
-		}
-		source, err := st.ValidatorAtIndex(c.Message.SourceIndex)
+		activeBal, err := helpers.TotalActiveBalance(st)
 		if err != nil {
 			return err
 		}
-		target, err := st.ValidatorAtIndex(c.Message.TargetIndex)
-		if err != nil {
-			return err
-		}
-		if !helpers.IsActiveValidator(source, currentEpoch) {
-			return errors.New("source is not active")
-		}
-		if !helpers.IsActiveValidator(target, currentEpoch) {
-			return errors.New("target is not active")
-		}
-		if source.ExitEpoch != params.BeaconConfig().FarFutureEpoch {
-			return errors.New("source exit epoch has been initiated")
-		}
-		if target.ExitEpoch != params.BeaconConfig().FarFutureEpoch {
-			return errors.New("target exit epoch has been initiated")
-		}
-		if currentEpoch < c.Message.Epoch {
-			return errors.New("consolidation is not valid yet")
+		churnLimit := helpers.ConsolidationChurnLimit(primitives.Gwei(activeBal))
+		if churnLimit <= primitives.Gwei(params.BeaconConfig().MinActivationBalance) {
+			return nil
 		}
 
-		if !helpers.HasExecutionWithdrawalCredentials(source) {
-			return errors.New("source does not have execution withdrawal credentials")
+		srcIdx, ok := st.ValidatorIndexByPubkey(sourcePubkey)
+		if !ok {
+			continue
 		}
-		if !helpers.HasExecutionWithdrawalCredentials(target) {
-			return errors.New("target does not have execution withdrawal credentials")
-		}
-		if !helpers.IsSameWithdrawalCredentials(source, target) {
-			return errors.New("source and target have different withdrawal credentials")
-		}
-
-		sr, err := signing.ComputeSigningRoot(c.Message, domain)
-		if err != nil {
-			return err
-		}
-		sourcePk, err := bls.PublicKeyFromBytes(source.PublicKey)
-		if err != nil {
-			return errors.Wrap(err, "could not convert source public key bytes to bls public key")
-		}
-		targetPk, err := bls.PublicKeyFromBytes(target.PublicKey)
-		if err != nil {
-			return errors.Wrap(err, "could not convert target public key bytes to bls public key")
-		}
-		sig, err := bls.SignatureFromBytes(c.Signature)
-		if err != nil {
-			return errors.Wrap(err, "could not convert bytes to signature")
-		}
-		if !sig.FastAggregateVerify([]bls.PublicKey{sourcePk, targetPk}, sr) {
-			return errors.New("consolidation signature verification failed")
+		tgtIdx, ok := st.ValidatorIndexByPubkey(targetPubkey)
+		if !ok {
+			continue
 		}
 
-		sEE, err := ComputeConsolidationEpochAndUpdateChurn(ctx, st, primitives.Gwei(source.EffectiveBalance))
+		srcV, err := st.ValidatorAtIndex(srcIdx)
+		if err != nil {
+			return fmt.Errorf("failed to fetch source validator: %w", err) // This should never happen.
+		}
+
+		roSrcV, err := state_native.NewValidator(srcV)
 		if err != nil {
 			return err
 		}
-		source.ExitEpoch = sEE
-		source.WithdrawableEpoch = sEE + params.BeaconConfig().MinValidatorWithdrawabilityDelay
-		if err := st.UpdateValidatorAtIndex(c.Message.SourceIndex, source); err != nil {
-			return err
+
+		tgtV, err := st.ValidatorAtIndexReadOnly(tgtIdx)
+		if err != nil {
+			return fmt.Errorf("failed to fetch target validator: %w", err) // This should never happen.
 		}
-		if err := st.AppendPendingConsolidation(c.Message.ToPendingConsolidation()); err != nil {
-			return err
+
+		// Verify source withdrawal credentials
+		if !roSrcV.HasExecutionWithdrawalCredentials() {
+			continue
+		}
+		// Confirm source_validator.withdrawal_credentials[12:] == consolidation_request.source_address
+		if len(srcV.WithdrawalCredentials) != 32 || len(cr.SourceAddress) != 20 || !bytes.HasSuffix(srcV.WithdrawalCredentials, cr.SourceAddress) {
+			continue
+		}
+
+		// Target validator must have their withdrawal credentials set appropriately.
+		if !tgtV.HasCompoundingWithdrawalCredentials() {
+			continue
+		}
+
+		// Both validators must be active.
+		if !helpers.IsActiveValidator(srcV, curEpoch) || !helpers.IsActiveValidatorUsingTrie(tgtV, curEpoch) {
+			continue
+		}
+		// Neither validator is exiting.
+		if srcV.ExitEpoch != ffe || tgtV.ExitEpoch() != ffe {
+			continue
+		}
+
+		e, overflow := math.SafeAdd(uint64(srcV.ActivationEpoch), uint64(params.BeaconConfig().ShardCommitteePeriod))
+		if overflow {
+			log.Error("Overflow when adding activation epoch and shard committee period")
+			continue
+		}
+		if uint64(curEpoch) < e {
+			continue
+		}
+		bal, err := st.PendingBalanceToWithdraw(srcIdx)
+		if err != nil {
+			log.WithError(err).Error("failed to fetch pending balance to withdraw")
+			continue
+		}
+		if bal > 0 {
+			continue
+		}
+
+		// Initiate the exit of the source validator.
+		exitEpoch, err := ComputeConsolidationEpochAndUpdateChurn(ctx, st, primitives.Gwei(srcV.EffectiveBalance))
+		if err != nil {
+			log.WithError(err).Error("failed to compute consolidation epoch")
+			continue
+		}
+		srcV.ExitEpoch = exitEpoch
+		srcV.WithdrawableEpoch = exitEpoch + minValWithdrawDelay
+		if err := st.UpdateValidatorAtIndex(srcIdx, srcV); err != nil {
+			return fmt.Errorf("failed to update validator: %w", err) // This should never happen.
+		}
+
+		if err := st.AppendPendingConsolidation(&eth.PendingConsolidation{SourceIndex: srcIdx, TargetIndex: tgtIdx}); err != nil {
+			return fmt.Errorf("failed to append pending consolidation: %w", err) // This should never happen.
 		}
 	}
 
 	return nil
+}
+
+// IsValidSwitchToCompoundingRequest returns true if the given consolidation request is valid for switching to compounding.
+//
+// Spec code:
+//
+// def is_valid_switch_to_compounding_request(
+//
+//	state: BeaconState,
+//	consolidation_request: ConsolidationRequest
+//
+// ) -> bool:
+//
+//	# Switch to compounding requires source and target be equal
+//	if consolidation_request.source_pubkey != consolidation_request.target_pubkey:
+//	    return False
+//
+//	# Verify pubkey exists
+//	source_pubkey = consolidation_request.source_pubkey
+//	validator_pubkeys = [v.pubkey for v in state.validators]
+//	if source_pubkey not in validator_pubkeys:
+//	    return False
+//
+//	source_validator = state.validators[ValidatorIndex(validator_pubkeys.index(source_pubkey))]
+//
+//	# Verify request has been authorized
+//	if source_validator.withdrawal_credentials[12:] != consolidation_request.source_address:
+//	    return False
+//
+//	# Verify source withdrawal credentials
+//	if not has_eth1_withdrawal_credential(source_validator):
+//	    return False
+//
+//	# Verify the source is active
+//	current_epoch = get_current_epoch(state)
+//	if not is_active_validator(source_validator, current_epoch):
+//	    return False
+//
+//	# Verify exit for source has not been initiated
+//	if source_validator.exit_epoch != FAR_FUTURE_EPOCH:
+//	    return False
+//
+//	return True
+func IsValidSwitchToCompoundingRequest(st state.BeaconState, req *enginev1.ConsolidationRequest) bool {
+	if req.SourcePubkey == nil || req.TargetPubkey == nil {
+		return false
+	}
+
+	if !bytes.Equal(req.SourcePubkey, req.TargetPubkey) {
+		return false
+	}
+
+	srcIdx, ok := st.ValidatorIndexByPubkey(bytesutil.ToBytes48(req.SourcePubkey))
+	if !ok {
+		return false
+	}
+	// As per the consensus specification, this error is not considered an assertion.
+	// Therefore, if the source_pubkey is not found in validator_pubkeys, we simply return false.
+	srcV, err := st.ValidatorAtIndexReadOnly(srcIdx)
+	if err != nil {
+		return false
+	}
+	sourceAddress := req.SourceAddress
+	withdrawalCreds := srcV.GetWithdrawalCredentials()
+	if len(withdrawalCreds) != 32 || len(sourceAddress) != 20 || !bytes.HasSuffix(withdrawalCreds, sourceAddress) {
+		return false
+	}
+
+	if !srcV.HasETH1WithdrawalCredentials() {
+		return false
+	}
+
+	curEpoch := slots.ToEpoch(st.Slot())
+	if !helpers.IsActiveValidatorUsingTrie(srcV, curEpoch) {
+		return false
+	}
+
+	if srcV.ExitEpoch() != params.BeaconConfig().FarFutureEpoch {
+		return false
+	}
+	return true
 }

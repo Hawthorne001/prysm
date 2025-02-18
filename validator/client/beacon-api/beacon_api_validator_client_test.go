@@ -6,17 +6,16 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/prysmaticlabs/prysm/v5/api/server/structs"
-	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
-	"go.uber.org/mock/gomock"
-
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/prysmaticlabs/prysm/v5/api/server/structs"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
+	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 	"github.com/prysmaticlabs/prysm/v5/encoding/bytesutil"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 	"github.com/prysmaticlabs/prysm/v5/testing/assert"
 	"github.com/prysmaticlabs/prysm/v5/testing/require"
 	"github.com/prysmaticlabs/prysm/v5/validator/client/beacon-api/mock"
+	"go.uber.org/mock/gomock"
 )
 
 // Make sure that AttestationData() returns the same thing as the internal attestationData()
@@ -140,7 +139,7 @@ func TestBeaconApiValidatorClient_ProposeBeaconBlockValid(t *testing.T) {
 	jsonRestHandler := mock.NewMockJsonRestHandler(ctrl)
 	jsonRestHandler.EXPECT().Post(
 		gomock.Any(),
-		"/eth/v1/beacon/blocks",
+		"/eth/v2/beacon/blocks",
 		map[string]string{"Eth-Consensus-Version": "phase0"},
 		gomock.Any(),
 		nil,
@@ -176,7 +175,7 @@ func TestBeaconApiValidatorClient_ProposeBeaconBlockError(t *testing.T) {
 	jsonRestHandler := mock.NewMockJsonRestHandler(ctrl)
 	jsonRestHandler.EXPECT().Post(
 		gomock.Any(),
-		"/eth/v1/beacon/blocks",
+		"/eth/v2/beacon/blocks",
 		map[string]string{"Eth-Consensus-Version": "phase0"},
 		gomock.Any(),
 		nil,

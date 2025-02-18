@@ -141,7 +141,7 @@ func WithdrawalSliceRoot(withdrawals []*enginev1.Withdrawal, limit uint64) ([32]
 	return MixInLength(bytesRoot, bytesRootBufRoot), nil
 }
 
-// DepositRequestsSliceRoot computes the HTR of a slice of deposit receipts.
+// DepositRequestsSliceRoot computes the HTR of a slice of deposit requests.
 // The limit parameter is used as input to the bitwise merkleization algorithm.
 func DepositRequestsSliceRoot(depositRequests []*enginev1.DepositRequest, limit uint64) ([32]byte, error) {
 	return SliceRoot(depositRequests, limit)
@@ -151,6 +151,13 @@ func DepositRequestsSliceRoot(depositRequests []*enginev1.DepositRequest, limit 
 // The limit parameter is used as input to the bitwise merkleization algorithm.
 func WithdrawalRequestsSliceRoot(withdrawalRequests []*enginev1.WithdrawalRequest, limit uint64) ([32]byte, error) {
 	return SliceRoot(withdrawalRequests, limit)
+}
+
+// ConsolidationRequestsSliceRoot computes the HTR of a slice of consolidation requests from the EL.
+// The limit parameter is used as input to the bitwise merkleization algorithm.
+
+func ConsolidationRequestsSliceRoot(consolidationRequests []*enginev1.ConsolidationRequest, limit uint64) ([32]byte, error) {
+	return SliceRoot(consolidationRequests, limit)
 }
 
 // ByteSliceRoot is a helper func to merkleize an arbitrary List[Byte, N]

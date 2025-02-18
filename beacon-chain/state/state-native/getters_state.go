@@ -22,12 +22,22 @@ func (b *BeaconState) ToProtoUnsafe() interface{} {
 	rm := b.randaoMixesVal().Slice()
 	var vals []*ethpb.Validator
 	var bals []uint64
+	var inactivityScores []uint64
+
 	if features.Get().EnableExperimentalState {
-		vals = b.validatorsVal()
-		bals = b.balancesVal()
+		if b.balancesMultiValue != nil {
+			bals = b.balancesMultiValue.Value(b)
+		}
+		if b.inactivityScoresMultiValue != nil {
+			inactivityScores = b.inactivityScoresMultiValue.Value(b)
+		}
+		if b.validatorsMultiValue != nil {
+			vals = b.validatorsMultiValue.Value(b)
+		}
 	} else {
-		vals = b.validators
 		bals = b.balances
+		inactivityScores = b.inactivityScores
+		vals = b.validators
 	}
 
 	switch b.version {
@@ -78,7 +88,7 @@ func (b *BeaconState) ToProtoUnsafe() interface{} {
 			PreviousJustifiedCheckpoint: b.previousJustifiedCheckpoint,
 			CurrentJustifiedCheckpoint:  b.currentJustifiedCheckpoint,
 			FinalizedCheckpoint:         b.finalizedCheckpoint,
-			InactivityScores:            b.inactivityScoresVal(),
+			InactivityScores:            inactivityScores,
 			CurrentSyncCommittee:        b.currentSyncCommittee,
 			NextSyncCommittee:           b.nextSyncCommittee,
 		}
@@ -105,7 +115,7 @@ func (b *BeaconState) ToProtoUnsafe() interface{} {
 			PreviousJustifiedCheckpoint:  b.previousJustifiedCheckpoint,
 			CurrentJustifiedCheckpoint:   b.currentJustifiedCheckpoint,
 			FinalizedCheckpoint:          b.finalizedCheckpoint,
-			InactivityScores:             b.inactivityScoresVal(),
+			InactivityScores:             inactivityScores,
 			CurrentSyncCommittee:         b.currentSyncCommittee,
 			NextSyncCommittee:            b.nextSyncCommittee,
 			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeader,
@@ -133,7 +143,7 @@ func (b *BeaconState) ToProtoUnsafe() interface{} {
 			PreviousJustifiedCheckpoint:  b.previousJustifiedCheckpoint,
 			CurrentJustifiedCheckpoint:   b.currentJustifiedCheckpoint,
 			FinalizedCheckpoint:          b.finalizedCheckpoint,
-			InactivityScores:             b.inactivityScoresVal(),
+			InactivityScores:             inactivityScores,
 			CurrentSyncCommittee:         b.currentSyncCommittee,
 			NextSyncCommittee:            b.nextSyncCommittee,
 			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeaderCapella,
@@ -164,7 +174,7 @@ func (b *BeaconState) ToProtoUnsafe() interface{} {
 			PreviousJustifiedCheckpoint:  b.previousJustifiedCheckpoint,
 			CurrentJustifiedCheckpoint:   b.currentJustifiedCheckpoint,
 			FinalizedCheckpoint:          b.finalizedCheckpoint,
-			InactivityScores:             b.inactivityScoresVal(),
+			InactivityScores:             inactivityScores,
 			CurrentSyncCommittee:         b.currentSyncCommittee,
 			NextSyncCommittee:            b.nextSyncCommittee,
 			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeaderDeneb,
@@ -172,7 +182,7 @@ func (b *BeaconState) ToProtoUnsafe() interface{} {
 			NextWithdrawalValidatorIndex: b.nextWithdrawalValidatorIndex,
 			HistoricalSummaries:          b.historicalSummaries,
 		}
-	case version.Electra:
+	case version.Electra, version.Fulu:
 		return &ethpb.BeaconStateElectra{
 			GenesisTime:                   b.genesisTime,
 			GenesisValidatorsRoot:         gvrCopy[:],
@@ -195,10 +205,10 @@ func (b *BeaconState) ToProtoUnsafe() interface{} {
 			PreviousJustifiedCheckpoint:   b.previousJustifiedCheckpoint,
 			CurrentJustifiedCheckpoint:    b.currentJustifiedCheckpoint,
 			FinalizedCheckpoint:           b.finalizedCheckpoint,
-			InactivityScores:              b.inactivityScoresVal(),
+			InactivityScores:              inactivityScores,
 			CurrentSyncCommittee:          b.currentSyncCommittee,
 			NextSyncCommittee:             b.nextSyncCommittee,
-			LatestExecutionPayloadHeader:  b.latestExecutionPayloadHeaderElectra,
+			LatestExecutionPayloadHeader:  b.latestExecutionPayloadHeaderDeneb,
 			NextWithdrawalIndex:           b.nextWithdrawalIndex,
 			NextWithdrawalValidatorIndex:  b.nextWithdrawalValidatorIndex,
 			HistoricalSummaries:           b.historicalSummaries,
@@ -208,7 +218,7 @@ func (b *BeaconState) ToProtoUnsafe() interface{} {
 			EarliestExitEpoch:             b.earliestExitEpoch,
 			ConsolidationBalanceToConsume: b.consolidationBalanceToConsume,
 			EarliestConsolidationEpoch:    b.earliestConsolidationEpoch,
-			PendingBalanceDeposits:        b.pendingBalanceDeposits,
+			PendingDeposits:               b.pendingDeposits,
 			PendingPartialWithdrawals:     b.pendingPartialWithdrawals,
 			PendingConsolidations:         b.pendingConsolidations,
 		}
@@ -314,7 +324,7 @@ func (b *BeaconState) ToProto() interface{} {
 			InactivityScores:             inactivityScores,
 			CurrentSyncCommittee:         b.currentSyncCommitteeVal(),
 			NextSyncCommittee:            b.nextSyncCommitteeVal(),
-			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeaderVal(),
+			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeader.Copy(),
 		}
 	case version.Capella:
 		return &ethpb.BeaconStateCapella{
@@ -342,7 +352,7 @@ func (b *BeaconState) ToProto() interface{} {
 			InactivityScores:             inactivityScores,
 			CurrentSyncCommittee:         b.currentSyncCommitteeVal(),
 			NextSyncCommittee:            b.nextSyncCommitteeVal(),
-			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeaderCapellaVal(),
+			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeaderCapella.Copy(),
 			NextWithdrawalIndex:          b.nextWithdrawalIndex,
 			NextWithdrawalValidatorIndex: b.nextWithdrawalValidatorIndex,
 			HistoricalSummaries:          b.historicalSummariesVal(),
@@ -373,12 +383,12 @@ func (b *BeaconState) ToProto() interface{} {
 			InactivityScores:             b.inactivityScoresVal(),
 			CurrentSyncCommittee:         b.currentSyncCommitteeVal(),
 			NextSyncCommittee:            b.nextSyncCommitteeVal(),
-			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeaderDenebVal(),
+			LatestExecutionPayloadHeader: b.latestExecutionPayloadHeaderDeneb.Copy(),
 			NextWithdrawalIndex:          b.nextWithdrawalIndex,
 			NextWithdrawalValidatorIndex: b.nextWithdrawalValidatorIndex,
 			HistoricalSummaries:          b.historicalSummariesVal(),
 		}
-	case version.Electra:
+	case version.Electra, version.Fulu:
 		return &ethpb.BeaconStateElectra{
 			GenesisTime:                   b.genesisTime,
 			GenesisValidatorsRoot:         gvrCopy[:],
@@ -404,7 +414,7 @@ func (b *BeaconState) ToProto() interface{} {
 			InactivityScores:              b.inactivityScoresVal(),
 			CurrentSyncCommittee:          b.currentSyncCommitteeVal(),
 			NextSyncCommittee:             b.nextSyncCommitteeVal(),
-			LatestExecutionPayloadHeader:  b.latestExecutionPayloadHeaderElectraVal(),
+			LatestExecutionPayloadHeader:  b.latestExecutionPayloadHeaderDeneb.Copy(),
 			NextWithdrawalIndex:           b.nextWithdrawalIndex,
 			NextWithdrawalValidatorIndex:  b.nextWithdrawalValidatorIndex,
 			HistoricalSummaries:           b.historicalSummariesVal(),
@@ -414,7 +424,7 @@ func (b *BeaconState) ToProto() interface{} {
 			EarliestExitEpoch:             b.earliestExitEpoch,
 			ConsolidationBalanceToConsume: b.consolidationBalanceToConsume,
 			EarliestConsolidationEpoch:    b.earliestConsolidationEpoch,
-			PendingBalanceDeposits:        b.pendingBalanceDepositsVal(),
+			PendingDeposits:               b.pendingDepositsVal(),
 			PendingPartialWithdrawals:     b.pendingPartialWithdrawalsVal(),
 			PendingConsolidations:         b.pendingConsolidationsVal(),
 		}
@@ -543,3 +553,5 @@ func ProtobufBeaconStateElectra(s interface{}) (*ethpb.BeaconStateElectra, error
 	}
 	return pbState, nil
 }
+
+var ProtobufBeaconStateFulu = ProtobufBeaconStateElectra

@@ -11,9 +11,9 @@ import (
 	"github.com/prysmaticlabs/prysm/v5/api/client/event"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 	"github.com/prysmaticlabs/prysm/v5/encoding/bytesutil"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing/trace"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 	"github.com/prysmaticlabs/prysm/v5/validator/client/iface"
-	"go.opencensus.io/trace"
 )
 
 type ValidatorClientOpt func(*beaconApiValidatorClient)
@@ -154,6 +154,15 @@ func (c *beaconApiValidatorClient) ProposeAttestation(ctx context.Context, in *e
 	})
 }
 
+func (c *beaconApiValidatorClient) ProposeAttestationElectra(ctx context.Context, in *ethpb.SingleAttestation) (*ethpb.AttestResponse, error) {
+	ctx, span := trace.StartSpan(ctx, "beacon-api.ProposeAttestationElectra")
+	defer span.End()
+
+	return wrapInMetrics[*ethpb.AttestResponse]("ProposeAttestationElectra", func() (*ethpb.AttestResponse, error) {
+		return c.proposeAttestationElectra(ctx, in)
+	})
+}
+
 func (c *beaconApiValidatorClient) ProposeBeaconBlock(ctx context.Context, in *ethpb.GenericSignedBeaconBlock) (*ethpb.ProposeResponse, error) {
 	ctx, span := trace.StartSpan(ctx, "beacon-api.ProposeBeaconBlock")
 	defer span.End()
@@ -185,12 +194,30 @@ func (c *beaconApiValidatorClient) SubmitAggregateSelectionProof(ctx context.Con
 	})
 }
 
+func (c *beaconApiValidatorClient) SubmitAggregateSelectionProofElectra(ctx context.Context, in *ethpb.AggregateSelectionRequest, index primitives.ValidatorIndex, committeeLength uint64) (*ethpb.AggregateSelectionElectraResponse, error) {
+	ctx, span := trace.StartSpan(ctx, "beacon-api.SubmitAggregateSelectionProofElectra")
+	defer span.End()
+
+	return wrapInMetrics[*ethpb.AggregateSelectionElectraResponse]("SubmitAggregateSelectionProofElectra", func() (*ethpb.AggregateSelectionElectraResponse, error) {
+		return c.submitAggregateSelectionProofElectra(ctx, in, index, committeeLength)
+	})
+}
+
 func (c *beaconApiValidatorClient) SubmitSignedAggregateSelectionProof(ctx context.Context, in *ethpb.SignedAggregateSubmitRequest) (*ethpb.SignedAggregateSubmitResponse, error) {
 	ctx, span := trace.StartSpan(ctx, "beacon-api.SubmitSignedAggregateSelectionProof")
 	defer span.End()
 
 	return wrapInMetrics[*ethpb.SignedAggregateSubmitResponse]("SubmitSignedAggregateSelectionProof", func() (*ethpb.SignedAggregateSubmitResponse, error) {
 		return c.submitSignedAggregateSelectionProof(ctx, in)
+	})
+}
+
+func (c *beaconApiValidatorClient) SubmitSignedAggregateSelectionProofElectra(ctx context.Context, in *ethpb.SignedAggregateSubmitElectraRequest) (*ethpb.SignedAggregateSubmitResponse, error) {
+	ctx, span := trace.StartSpan(ctx, "beacon-api.SubmitSignedAggregateSelectionProofElectra")
+	defer span.End()
+
+	return wrapInMetrics[*ethpb.SignedAggregateSubmitResponse]("SubmitSignedAggregateSelectionProofElectra", func() (*ethpb.SignedAggregateSubmitResponse, error) {
+		return c.submitSignedAggregateSelectionProofElectra(ctx, in)
 	})
 }
 
@@ -244,13 +271,6 @@ func (c *beaconApiValidatorClient) ValidatorStatus(ctx context.Context, in *ethp
 	defer span.End()
 
 	return c.validatorStatus(ctx, in)
-}
-
-func (c *beaconApiValidatorClient) WaitForActivation(ctx context.Context, in *ethpb.ValidatorActivationRequest) (ethpb.BeaconNodeValidator_WaitForActivationClient, error) {
-	ctx, span := trace.StartSpan(ctx, "beacon-api.WaitForActivation")
-	defer span.End()
-
-	return c.waitForActivation(ctx, in)
 }
 
 // Deprecated: Do not use.

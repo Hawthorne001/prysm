@@ -14,16 +14,17 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/prysmaticlabs/prysm/v5/api"
+	"github.com/prysmaticlabs/prysm/v5/api/client"
 	"github.com/prysmaticlabs/prysm/v5/api/server/structs"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/blocks"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/interfaces"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing"
+	"github.com/prysmaticlabs/prysm/v5/monitoring/tracing/trace"
 	v1 "github.com/prysmaticlabs/prysm/v5/proto/engine/v1"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 	"github.com/prysmaticlabs/prysm/v5/runtime/version"
 	log "github.com/sirupsen/logrus"
-	"go.opencensus.io/trace"
 )
 
 const (
@@ -146,7 +147,7 @@ func (c *Client) do(ctx context.Context, method string, path string, body io.Rea
 
 	u := c.baseURL.ResolveReference(&url.URL{Path: path})
 
-	span.AddAttributes(trace.StringAttribute("url", u.String()),
+	span.SetAttributes(trace.StringAttribute("url", u.String()),
 		trace.StringAttribute("method", method))
 
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
@@ -176,7 +177,7 @@ func (c *Client) do(ctx context.Context, method string, path string, body io.Rea
 		err = non200Err(r)
 		return
 	}
-	res, err = io.ReadAll(r.Body)
+	res, err = io.ReadAll(io.LimitReader(r.Body, client.MaxBodySize))
 	if err != nil {
 		err = errors.Wrap(err, "error reading http response body from builder server")
 		return
@@ -218,8 +219,23 @@ func (c *Client) GetHeader(ctx context.Context, slot primitives.Slot, parentHash
 	if err := json.Unmarshal(hb, v); err != nil {
 		return nil, errors.Wrapf(err, "error unmarshaling the builder GetHeader response, using slot=%d, parentHash=%#x, pubkey=%#x", slot, parentHash, pubkey)
 	}
-	switch strings.ToLower(v.Version) {
-	case strings.ToLower(version.String(version.Deneb)):
+
+	ver, err := version.FromString(strings.ToLower(v.Version))
+	if err != nil {
+		return nil, errors.Wrap(err, fmt.Sprintf("unsupported header version %s", strings.ToLower(v.Version)))
+	}
+	if ver >= version.Electra {
+		hr := &ExecHeaderResponseElectra{}
+		if err := json.Unmarshal(hb, hr); err != nil {
+			return nil, errors.Wrapf(err, "error unmarshaling the builder GetHeader response, using slot=%d, parentHash=%#x, pubkey=%#x", slot, parentHash, pubkey)
+		}
+		p, err := hr.ToProto()
+		if err != nil {
+			return nil, errors.Wrapf(err, "could not extract proto message from header")
+		}
+		return WrappedSignedBuilderBidElectra(p)
+	}
+	if ver >= version.Deneb {
 		hr := &ExecHeaderResponseDeneb{}
 		if err := json.Unmarshal(hb, hr); err != nil {
 			return nil, errors.Wrapf(err, "error unmarshaling the builder GetHeader response, using slot=%d, parentHash=%#x, pubkey=%#x", slot, parentHash, pubkey)
@@ -229,7 +245,8 @@ func (c *Client) GetHeader(ctx context.Context, slot primitives.Slot, parentHash
 			return nil, errors.Wrapf(err, "could not extract proto message from header")
 		}
 		return WrappedSignedBuilderBidDeneb(p)
-	case strings.ToLower(version.String(version.Capella)):
+	}
+	if ver >= version.Capella {
 		hr := &ExecHeaderResponseCapella{}
 		if err := json.Unmarshal(hb, hr); err != nil {
 			return nil, errors.Wrapf(err, "error unmarshaling the builder GetHeader response, using slot=%d, parentHash=%#x, pubkey=%#x", slot, parentHash, pubkey)
@@ -239,7 +256,8 @@ func (c *Client) GetHeader(ctx context.Context, slot primitives.Slot, parentHash
 			return nil, errors.Wrapf(err, "could not extract proto message from header")
 		}
 		return WrappedSignedBuilderBidCapella(p)
-	case strings.ToLower(version.String(version.Bellatrix)):
+	}
+	if ver >= version.Bellatrix {
 		hr := &ExecHeaderResponse{}
 		if err := json.Unmarshal(hb, hr); err != nil {
 			return nil, errors.Wrapf(err, "error unmarshaling the builder GetHeader response, using slot=%d, parentHash=%#x, pubkey=%#x", slot, parentHash, pubkey)
@@ -249,9 +267,8 @@ func (c *Client) GetHeader(ctx context.Context, slot primitives.Slot, parentHash
 			return nil, errors.Wrap(err, "could not extract proto message from header")
 		}
 		return WrappedSignedBuilderBid(p)
-	default:
-		return nil, fmt.Errorf("unsupported header version %s", strings.ToLower(v.Version))
 	}
+	return nil, fmt.Errorf("unsupported header version %s", strings.ToLower(v.Version))
 }
 
 // RegisterValidator encodes the SignedValidatorRegistrationV1 message to json (including hex-encoding the byte
@@ -259,7 +276,7 @@ func (c *Client) GetHeader(ctx context.Context, slot primitives.Slot, parentHash
 func (c *Client) RegisterValidator(ctx context.Context, svr []*ethpb.SignedValidatorRegistrationV1) error {
 	ctx, span := trace.StartSpan(ctx, "builder.client.RegisterValidator")
 	defer span.End()
-	span.AddAttributes(trace.Int64Attribute("num_reqs", int64(len(svr))))
+	span.SetAttributes(trace.Int64Attribute("num_reqs", int64(len(svr))))
 
 	if len(svr) == 0 {
 		err := errors.Wrap(errMalformedRequest, "empty validator registration list")
@@ -278,7 +295,11 @@ func (c *Client) RegisterValidator(ctx context.Context, svr []*ethpb.SignedValid
 	}
 
 	_, err = c.do(ctx, http.MethodPost, postRegisterValidatorPath, bytes.NewBuffer(body))
-	return err
+	if err != nil {
+		return err
+	}
+	log.WithField("registrationCount", len(svr)).Debug("Successfully registered validator(s) on builder")
+	return nil
 }
 
 var errResponseVersionMismatch = errors.New("builder API response uses a different version than requested in " + api.VersionHeader + " header")
@@ -354,7 +375,7 @@ func (c *Client) Status(ctx context.Context) error {
 }
 
 func non200Err(response *http.Response) error {
-	bodyBytes, err := io.ReadAll(response.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(response.Body, client.MaxErrBodySize))
 	var errMessage ErrorMessage
 	var body string
 	if err != nil {

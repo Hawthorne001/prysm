@@ -3,21 +3,23 @@ package kv
 import (
 	"github.com/pkg/errors"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
+	"github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1/attestation"
 )
 
 // SaveBlockAttestation saves an block attestation in cache.
 func (c *AttCaches) SaveBlockAttestation(att ethpb.Att) error {
-	if att == nil {
+	if att == nil || att.IsNil() {
 		return nil
 	}
-	r, err := hashFn(att.GetData())
+
+	id, err := attestation.NewId(att, attestation.Data)
 	if err != nil {
-		return errors.Wrap(err, "could not tree hash attestation")
+		return errors.Wrap(err, "could not create attestation ID")
 	}
 
 	c.blockAttLock.Lock()
 	defer c.blockAttLock.Unlock()
-	atts, ok := c.blockAtt[r]
+	atts, ok := c.blockAtt[id]
 	if !ok {
 		atts = make([]ethpb.Att, 0, 1)
 	}
@@ -31,7 +33,7 @@ func (c *AttCaches) SaveBlockAttestation(att ethpb.Att) error {
 		}
 	}
 
-	c.blockAtt[r] = append(atts, att.Copy())
+	c.blockAtt[id] = append(atts, att.Clone())
 
 	return nil
 }
@@ -51,17 +53,17 @@ func (c *AttCaches) BlockAttestations() []ethpb.Att {
 
 // DeleteBlockAttestation deletes a block attestation in cache.
 func (c *AttCaches) DeleteBlockAttestation(att ethpb.Att) error {
-	if att == nil {
+	if att == nil || att.IsNil() {
 		return nil
 	}
-	r, err := hashFn(att.GetData())
+	id, err := attestation.NewId(att, attestation.Data)
 	if err != nil {
-		return errors.Wrap(err, "could not tree hash attestation")
+		return errors.Wrap(err, "could not create attestation ID")
 	}
 
 	c.blockAttLock.Lock()
 	defer c.blockAttLock.Unlock()
-	delete(c.blockAtt, r)
+	delete(c.blockAtt, id)
 
 	return nil
 }

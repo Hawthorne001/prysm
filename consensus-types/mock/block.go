@@ -5,6 +5,7 @@ import (
 	field_params "github.com/prysmaticlabs/prysm/v5/config/fieldparams"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/interfaces"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
+	enginev1 "github.com/prysmaticlabs/prysm/v5/proto/engine/v1"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/eth/v1"
 	eth "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 	validatorpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1/validator-client"
@@ -162,10 +163,6 @@ func (BeaconBlock) SetParentRoot(_ []byte) {
 	panic("implement me")
 }
 
-func (BeaconBlock) Copy() (interfaces.ReadOnlyBeaconBlock, error) {
-	panic("implement me")
-}
-
 type BeaconBlockBody struct{}
 
 func (BeaconBlockBody) RandaoReveal() [field_params.BLSSignatureLength]byte {
@@ -273,13 +270,13 @@ func (b *BeaconBlockBody) BlobKzgCommitments() ([][]byte, error) {
 	panic("implement me")
 }
 
-func (b *BeaconBlockBody) Attestations() []eth.Att {
-	panic("implement me")
-}
-func (b *BeaconBlockBody) Consolidations() []*eth.SignedConsolidation {
+func (b *BeaconBlockBody) ExecutionRequests() (*enginev1.ExecutionRequests, error) {
 	panic("implement me")
 }
 
+func (b *BeaconBlockBody) Attestations() []eth.Att {
+	panic("implement me")
+}
 func (b *BeaconBlockBody) Version() int {
 	panic("implement me")
 }
@@ -287,4 +284,3 @@ func (b *BeaconBlockBody) Version() int {
 var _ interfaces.ReadOnlySignedBeaconBlock = &SignedBeaconBlock{}
 var _ interfaces.ReadOnlyBeaconBlock = &BeaconBlock{}
 var _ interfaces.ReadOnlyBeaconBlockBody = &BeaconBlockBody{}
-var _ interfaces.ROBlockBodyElectra = &BeaconBlockBody{}

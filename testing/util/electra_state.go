@@ -32,8 +32,22 @@ func DeterministicGenesisStateElectra(t testing.TB, numValidators uint64) (state
 	if err != nil {
 		t.Fatal(errors.Wrapf(err, "failed to get genesis beacon state of %d validators", numValidators))
 	}
+	if err := setKeysToActive(beaconState); err != nil {
+		t.Fatal(errors.Wrapf(err, "failed to set keys to active"))
+	}
 	resetCache()
 	return beaconState, privKeys
+}
+
+// setKeysToActive is a function to set the validators to active post electra, electra no longer processes deposits based on eth1data
+func setKeysToActive(beaconState state.BeaconState) error {
+	vals := make([]*ethpb.Validator, len(beaconState.Validators()))
+	for i, val := range beaconState.Validators() {
+		val.ActivationEpoch = 0
+		val.EffectiveBalance = params.BeaconConfig().MinActivationBalance
+		vals[i] = val
+	}
+	return beaconState.SetValidators(vals)
 }
 
 // genesisBeaconStateElectra returns the genesis beacon state.
@@ -57,14 +71,14 @@ func genesisBeaconStateElectra(ctx context.Context, deposits []*ethpb.Deposit, g
 	return buildGenesisBeaconStateElectra(genesisTime, st, st.Eth1Data())
 }
 
-// emptyGenesisStateDeneb returns an empty genesis state in Electra format.
+// emptyGenesisStateElectra returns an empty genesis state in Electra format.
 func emptyGenesisStateElectra() (state.BeaconState, error) {
 	st := &ethpb.BeaconStateElectra{
 		// Misc fields.
 		Slot: 0,
 		Fork: &ethpb.Fork{
-			PreviousVersion: params.BeaconConfig().BellatrixForkVersion,
-			CurrentVersion:  params.BeaconConfig().DenebForkVersion,
+			PreviousVersion: params.BeaconConfig().DenebForkVersion,
+			CurrentVersion:  params.BeaconConfig().ElectraForkVersion,
 			Epoch:           0,
 		},
 		// Validator registry fields.
@@ -82,7 +96,7 @@ func emptyGenesisStateElectra() (state.BeaconState, error) {
 		Eth1DataVotes:    []*ethpb.Eth1Data{},
 		Eth1DepositIndex: 0,
 
-		LatestExecutionPayloadHeader: &enginev1.ExecutionPayloadHeaderElectra{},
+		LatestExecutionPayloadHeader: &enginev1.ExecutionPayloadHeaderDeneb{},
 
 		DepositBalanceToConsume:       primitives.Gwei(0),
 		ExitBalanceToConsume:          primitives.Gwei(0),
@@ -195,7 +209,7 @@ func buildGenesisBeaconStateElectra(genesisTime uint64, preState state.BeaconSta
 		ExitBalanceToConsume:          helpers.ActivationExitChurnLimit(primitives.Gwei(tab)),
 		EarliestConsolidationEpoch:    helpers.ActivationExitEpoch(slots.ToEpoch(preState.Slot())),
 		ConsolidationBalanceToConsume: helpers.ConsolidationChurnLimit(primitives.Gwei(tab)),
-		PendingBalanceDeposits:        make([]*ethpb.PendingBalanceDeposit, 0),
+		PendingDeposits:               make([]*ethpb.PendingDeposit, 0),
 		PendingPartialWithdrawals:     make([]*ethpb.PendingPartialWithdrawal, 0),
 		PendingConsolidations:         make([]*ethpb.PendingConsolidation, 0),
 	}
@@ -212,20 +226,22 @@ func buildGenesisBeaconStateElectra(genesisTime uint64, preState state.BeaconSta
 			SyncCommitteeBits:      scBits[:],
 			SyncCommitteeSignature: make([]byte, 96),
 		},
-		ExecutionPayload: &enginev1.ExecutionPayloadElectra{
-			ParentHash:         make([]byte, 32),
-			FeeRecipient:       make([]byte, 20),
-			StateRoot:          make([]byte, 32),
-			ReceiptsRoot:       make([]byte, 32),
-			LogsBloom:          make([]byte, 256),
-			PrevRandao:         make([]byte, 32),
-			ExtraData:          make([]byte, 0),
-			BaseFeePerGas:      make([]byte, 32),
-			BlockHash:          make([]byte, 32),
-			Transactions:       make([][]byte, 0),
-			Withdrawals:        make([]*enginev1.Withdrawal, 0),
-			DepositRequests:    make([]*enginev1.DepositRequest, 0),
-			WithdrawalRequests: make([]*enginev1.WithdrawalRequest, 0),
+		ExecutionPayload: &enginev1.ExecutionPayloadDeneb{
+			ParentHash:    make([]byte, 32),
+			FeeRecipient:  make([]byte, 20),
+			StateRoot:     make([]byte, 32),
+			ReceiptsRoot:  make([]byte, 32),
+			LogsBloom:     make([]byte, 256),
+			PrevRandao:    make([]byte, 32),
+			ExtraData:     make([]byte, 0),
+			BaseFeePerGas: make([]byte, 32),
+			BlockHash:     make([]byte, 32),
+			Transactions:  make([][]byte, 0),
+		},
+		ExecutionRequests: &enginev1.ExecutionRequests{
+			Deposits:       make([]*enginev1.DepositRequest, 0),
+			Withdrawals:    make([]*enginev1.WithdrawalRequest, 0),
+			Consolidations: make([]*enginev1.ConsolidationRequest, 0),
 		},
 	}).HashTreeRoot()
 	if err != nil {
@@ -257,20 +273,18 @@ func buildGenesisBeaconStateElectra(genesisTime uint64, preState state.BeaconSta
 		AggregatePubkey: aggregated.Marshal(),
 	}
 
-	st.LatestExecutionPayloadHeader = &enginev1.ExecutionPayloadHeaderElectra{
-		ParentHash:             make([]byte, 32),
-		FeeRecipient:           make([]byte, 20),
-		StateRoot:              make([]byte, 32),
-		ReceiptsRoot:           make([]byte, 32),
-		LogsBloom:              make([]byte, 256),
-		PrevRandao:             make([]byte, 32),
-		ExtraData:              make([]byte, 0),
-		BaseFeePerGas:          make([]byte, 32),
-		BlockHash:              make([]byte, 32),
-		TransactionsRoot:       make([]byte, 32),
-		WithdrawalsRoot:        make([]byte, 32),
-		DepositRequestsRoot:    make([]byte, 32),
-		WithdrawalRequestsRoot: make([]byte, 32),
+	st.LatestExecutionPayloadHeader = &enginev1.ExecutionPayloadHeaderDeneb{
+		ParentHash:       make([]byte, 32),
+		FeeRecipient:     make([]byte, 20),
+		StateRoot:        make([]byte, 32),
+		ReceiptsRoot:     make([]byte, 32),
+		LogsBloom:        make([]byte, 256),
+		PrevRandao:       make([]byte, 32),
+		ExtraData:        make([]byte, 0),
+		BaseFeePerGas:    make([]byte, 32),
+		BlockHash:        make([]byte, 32),
+		TransactionsRoot: make([]byte, 32),
+		WithdrawalsRoot:  make([]byte, 32),
 	}
 
 	return state_native.InitializeFromProtoElectra(st)

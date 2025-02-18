@@ -4,8 +4,8 @@ go_library(
     name = "go_default_library",
     srcs = [
         "beacon_block.go",
-        "cast.go",
         "error.go",
+        "light_client.go",
         "utils.go",
         "validator.go",
     ],

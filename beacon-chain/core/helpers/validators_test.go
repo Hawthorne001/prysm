@@ -16,9 +16,9 @@ import (
 	"github.com/prysmaticlabs/prysm/v5/crypto/hash"
 	"github.com/prysmaticlabs/prysm/v5/encoding/bytesutil"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
+	"github.com/prysmaticlabs/prysm/v5/runtime/version"
 	"github.com/prysmaticlabs/prysm/v5/testing/assert"
 	"github.com/prysmaticlabs/prysm/v5/testing/require"
-	"github.com/prysmaticlabs/prysm/v5/testing/util"
 )
 
 func TestIsActiveValidator_OK(t *testing.T) {
@@ -598,10 +598,11 @@ func TestComputeProposerIndex(t *testing.T) {
 		seed       [32]byte
 	}
 	tests := []struct {
-		name      string
-		args      args
-		want      primitives.ValidatorIndex
-		wantedErr string
+		name             string
+		isElectraOrAbove bool
+		args             args
+		want             primitives.ValidatorIndex
+		wantedErr        string
 	}{
 		{
 			name: "all_active_indices",
@@ -683,6 +684,54 @@ func TestComputeProposerIndex(t *testing.T) {
 			},
 			want: 7,
 		},
+		{
+			name:             "electra_probability_changes",
+			isElectraOrAbove: true,
+			args: args{
+				validators: []*ethpb.Validator{
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalance},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalance},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalance},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalanceElectra},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalance},
+				},
+				indices: []primitives.ValidatorIndex{3},
+				seed:    seed,
+			},
+			want: 3,
+		},
+		{
+			name:             "electra_probability_changes_all_active",
+			isElectraOrAbove: true,
+			args: args{
+				validators: []*ethpb.Validator{
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalanceElectra},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalanceElectra},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalance}, // skip this one
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalanceElectra},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalanceElectra},
+				},
+				indices: []primitives.ValidatorIndex{0, 1, 2, 3, 4},
+				seed:    seed,
+			},
+			want: 4,
+		},
+		{
+			name:             "electra_probability_returns_first_validator_with_criteria",
+			isElectraOrAbove: true,
+			args: args{
+				validators: []*ethpb.Validator{
+					{EffectiveBalance: 1},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalanceElectra},
+					{EffectiveBalance: 1},
+					{EffectiveBalance: 1},
+					{EffectiveBalance: params.BeaconConfig().MaxEffectiveBalanceElectra},
+				},
+				indices: []primitives.ValidatorIndex{1},
+				seed:    seed,
+			},
+			want: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -691,6 +740,11 @@ func TestComputeProposerIndex(t *testing.T) {
 			bState := &ethpb.BeaconState{Validators: tt.args.validators}
 			stTrie, err := state_native.InitializeFromProtoUnsafePhase0(bState)
 			require.NoError(t, err)
+			if tt.isElectraOrAbove {
+				stTrie, err = state_native.InitializeFromProtoUnsafeElectra(&ethpb.BeaconStateElectra{Validators: tt.args.validators})
+				require.NoError(t, err)
+			}
+
 			got, err := helpers.ComputeProposerIndex(stTrie, tt.args.indices, tt.args.seed)
 			if tt.wantedErr != "" {
 				assert.ErrorContains(t, tt.wantedErr, err)
@@ -744,7 +798,9 @@ func TestIsEligibleForActivationQueue(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			helpers.ClearCache()
 
-			assert.Equal(t, tt.want, helpers.IsEligibleForActivationQueue(tt.validator, tt.currentEpoch), "IsEligibleForActivationQueue()")
+			v, err := state_native.NewValidator(tt.validator)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, helpers.IsEligibleForActivationQueue(v, tt.currentEpoch), "IsEligibleForActivationQueue()")
 		})
 	}
 }
@@ -785,7 +841,6 @@ func computeProposerIndexWithValidators(validators []*ethpb.Validator, activeInd
 	if length == 0 {
 		return 0, errors.New("empty active indices list")
 	}
-	maxRandomByte := uint64(1<<8 - 1)
 	hashFunc := hash.CustomSHA256Hasher()
 
 	for i := uint64(0); ; i++ {
@@ -804,7 +859,7 @@ func computeProposerIndexWithValidators(validators []*ethpb.Validator, activeInd
 		if v != nil {
 			effectiveBal = v.EffectiveBalance
 		}
-		if effectiveBal*maxRandomByte >= params.BeaconConfig().MaxEffectiveBalance*uint64(randomByte) {
+		if effectiveBal*fieldparams.MaxRandomByte >= params.BeaconConfig().MaxEffectiveBalance*uint64(randomByte) {
 			return candidateIndex, nil
 		}
 	}
@@ -855,13 +910,15 @@ func TestProposerIndexFromCheckpoint(t *testing.T) {
 func TestHasETH1WithdrawalCredentials(t *testing.T) {
 	creds := []byte{0xFA, 0xCC}
 	v := &ethpb.Validator{WithdrawalCredentials: creds}
-	require.Equal(t, false, helpers.HasETH1WithdrawalCredential(v))
+	roV, err := state_native.NewValidator(v)
+	require.NoError(t, err)
+	require.Equal(t, false, roV.HasETH1WithdrawalCredentials())
 	creds = []byte{params.BeaconConfig().ETH1AddressWithdrawalPrefixByte, 0xCC}
 	v = &ethpb.Validator{WithdrawalCredentials: creds}
-	require.Equal(t, true, helpers.HasETH1WithdrawalCredential(v))
+	roV, err = state_native.NewValidator(v)
+	require.NoError(t, err)
+	require.Equal(t, true, roV.HasETH1WithdrawalCredentials())
 	// No Withdrawal cred
-	v = &ethpb.Validator{}
-	require.Equal(t, false, helpers.HasETH1WithdrawalCredential(v))
 }
 
 func TestHasCompoundingWithdrawalCredential(t *testing.T) {
@@ -876,11 +933,12 @@ func TestHasCompoundingWithdrawalCredential(t *testing.T) {
 		{"Does not have compounding withdrawal credential",
 			&ethpb.Validator{WithdrawalCredentials: bytesutil.PadTo([]byte{0x00}, 32)},
 			false},
-		{"Handles nil case", nil, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, helpers.HasCompoundingWithdrawalCredential(tt.validator))
+			roV, err := state_native.NewValidator(tt.validator)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, roV.HasCompoundingWithdrawalCredentials())
 		})
 	}
 }
@@ -900,11 +958,12 @@ func TestHasExecutionWithdrawalCredentials(t *testing.T) {
 		{"Does not have compounding withdrawal credential or eth1 withdrawal credential",
 			&ethpb.Validator{WithdrawalCredentials: bytesutil.PadTo([]byte{0x00}, 32)},
 			false},
-		{"Handles nil case", nil, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, helpers.HasExecutionWithdrawalCredentials(tt.validator))
+			roV, err := state_native.NewValidator(tt.validator)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, roV.HasExecutionWithdrawalCredentials())
 		})
 	}
 }
@@ -915,15 +974,9 @@ func TestIsFullyWithdrawableValidator(t *testing.T) {
 		validator *ethpb.Validator
 		balance   uint64
 		epoch     primitives.Epoch
+		fork      int
 		want      bool
 	}{
-		{
-			name:      "Handles nil case",
-			validator: nil,
-			balance:   0,
-			epoch:     0,
-			want:      false,
-		},
 		{
 			name: "No ETH1 prefix",
 			validator: &ethpb.Validator{
@@ -972,13 +1025,16 @@ func TestIsFullyWithdrawableValidator(t *testing.T) {
 			},
 			balance: params.BeaconConfig().MaxEffectiveBalance,
 			epoch:   params.BeaconConfig().ElectraForkEpoch,
+			fork:    version.Electra,
 			want:    true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, helpers.IsFullyWithdrawableValidator(tt.validator, tt.balance, tt.epoch))
+			v, err := state_native.NewValidator(tt.validator)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, helpers.IsFullyWithdrawableValidator(v, tt.balance, tt.epoch, tt.fork))
 		})
 	}
 }
@@ -989,15 +1045,9 @@ func TestIsPartiallyWithdrawableValidator(t *testing.T) {
 		validator *ethpb.Validator
 		balance   uint64
 		epoch     primitives.Epoch
+		fork      int
 		want      bool
 	}{
-		{
-			name:      "Handles nil case",
-			validator: nil,
-			balance:   0,
-			epoch:     0,
-			want:      false,
-		},
 		{
 			name: "No ETH1 prefix",
 			validator: &ethpb.Validator{
@@ -1036,6 +1086,7 @@ func TestIsPartiallyWithdrawableValidator(t *testing.T) {
 			},
 			balance: params.BeaconConfig().MinActivationBalance * 2,
 			epoch:   params.BeaconConfig().ElectraForkEpoch,
+			fork:    version.Electra,
 			want:    true,
 		},
 		{
@@ -1046,13 +1097,16 @@ func TestIsPartiallyWithdrawableValidator(t *testing.T) {
 			},
 			balance: params.BeaconConfig().MaxEffectiveBalanceElectra * 2,
 			epoch:   params.BeaconConfig().ElectraForkEpoch,
+			fork:    version.Electra,
 			want:    true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, helpers.IsPartiallyWithdrawableValidator(tt.validator, tt.balance, tt.epoch))
+			v, err := state_native.NewValidator(tt.validator)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, helpers.IsPartiallyWithdrawableValidator(v, tt.balance, tt.epoch, tt.fork))
 		})
 	}
 }
@@ -1106,54 +1160,14 @@ func TestValidatorMaxEffectiveBalance(t *testing.T) {
 			validator: &ethpb.Validator{WithdrawalCredentials: []byte{params.BeaconConfig().ETH1AddressWithdrawalPrefixByte, 0xCC}},
 			want:      params.BeaconConfig().MinActivationBalance,
 		},
-		{
-			"Handles nil case",
-			nil,
-			params.BeaconConfig().MinActivationBalance,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, helpers.ValidatorMaxEffectiveBalance(tt.validator))
+			v, err := state_native.NewValidator(tt.validator)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, helpers.ValidatorMaxEffectiveBalance(v))
 		})
 	}
 	// Sanity check that MinActivationBalance equals (pre-electra) MaxEffectiveBalance
 	assert.Equal(t, params.BeaconConfig().MinActivationBalance, params.BeaconConfig().MaxEffectiveBalance)
-}
-
-func TestQueueExcessActiveBalance_Ok(t *testing.T) {
-	st, _ := util.DeterministicGenesisStateElectra(t, params.BeaconConfig().MaxValidatorsPerCommittee)
-	bals := st.Balances()
-	bals[0] = params.BeaconConfig().MinActivationBalance + 1000
-	require.NoError(t, st.SetBalances(bals))
-
-	err := helpers.QueueExcessActiveBalance(st, 0)
-	require.NoError(t, err)
-
-	pbd, err := st.PendingBalanceDeposits()
-	require.NoError(t, err)
-	require.Equal(t, uint64(1000), pbd[0].Amount)
-
-	bals = st.Balances()
-	require.Equal(t, params.BeaconConfig().MinActivationBalance, bals[0])
-}
-
-func TestQueueEntireBalanceAndResetValidator_Ok(t *testing.T) {
-	st, _ := util.DeterministicGenesisStateElectra(t, params.BeaconConfig().MaxValidatorsPerCommittee)
-	val, err := st.ValidatorAtIndex(0)
-	require.NoError(t, err)
-	require.Equal(t, params.BeaconConfig().MaxEffectiveBalance, val.EffectiveBalance)
-	pbd, err := st.PendingBalanceDeposits()
-	require.NoError(t, err)
-	require.Equal(t, 0, len(pbd))
-	err = helpers.QueueEntireBalanceAndResetValidator(st, 0)
-	require.NoError(t, err)
-
-	pbd, err = st.PendingBalanceDeposits()
-	require.NoError(t, err)
-	require.Equal(t, 1, len(pbd))
-
-	val, err = st.ValidatorAtIndex(0)
-	require.NoError(t, err)
-	require.Equal(t, uint64(0), val.EffectiveBalance)
 }

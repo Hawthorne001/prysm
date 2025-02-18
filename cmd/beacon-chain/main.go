@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	runtimeDebug "runtime/debug"
+	"time"
 
 	gethlog "github.com/ethereum/go-ethereum/log"
 	golog "github.com/ipfs/go-log/v2"
@@ -49,10 +50,9 @@ var appFlags = []cli.Flag{
 	flags.CertFlag,
 	flags.KeyFlag,
 	flags.HTTPModules,
-	flags.DisableGRPCGateway,
-	flags.GRPCGatewayHost,
-	flags.GRPCGatewayPort,
-	flags.GPRCGatewayCorsDomain,
+	flags.HTTPServerHost,
+	flags.HTTPServerPort,
+	flags.HTTPServerCorsDomain,
 	flags.MinSyncPeers,
 	flags.ContractDeploymentBlock,
 	flags.SetGCPercent,
@@ -61,8 +61,6 @@ var appFlags = []cli.Flag{
 	flags.BlobBatchLimit,
 	flags.BlobBatchLimitBurstFactor,
 	flags.InteropMockEth1DataVotesFlag,
-	flags.InteropNumValidatorsFlag,
-	flags.InteropGenesisTimeFlag,
 	flags.SlotsPerArchivedPoint,
 	flags.DisableDebugRPCEndpoints,
 	flags.SubscribeToAllSubnets,
@@ -82,6 +80,10 @@ var appFlags = []cli.Flag{
 	flags.MaxBuilderConsecutiveMissedSlots,
 	flags.EngineEndpointTimeoutSeconds,
 	flags.LocalBlockValueBoost,
+	flags.MinBuilderBid,
+	flags.MinBuilderDiff,
+	flags.BeaconDBPruning,
+	flags.PrunerRetentionEpochs,
 	cmd.BackupWebhookOutputDir,
 	cmd.MinimalConfigFlag,
 	cmd.E2EConfigFlag,
@@ -143,6 +145,7 @@ var appFlags = []cli.Flag{
 	flags.JwtId,
 	storage.BlobStoragePathFlag,
 	storage.BlobRetentionEpochFlag,
+	storage.BlobStorageLayout,
 	bflags.EnableExperimentalBackfill,
 	bflags.BackfillBatchSize,
 	bflags.BackfillWorkerCount,
@@ -164,7 +167,7 @@ func before(ctx *cli.Context) error {
 	switch format {
 	case "text":
 		formatter := new(prefixed.TextFormatter)
-		formatter.TimestampFormat = "2006-01-02 15:04:05"
+		formatter.TimestampFormat = time.DateTime
 		formatter.FullTimestamp = true
 
 		// If persistent log files are written - we disable the log messages coloring because
@@ -210,6 +213,10 @@ func before(ctx *cli.Context) error {
 
 	if err := fdlimits.SetMaxFdLimits(); err != nil {
 		return errors.Wrap(err, "failed to set max fd limits")
+	}
+
+	if err := features.ValidateNetworkFlags(ctx); err != nil {
+		return errors.Wrap(err, "provided multiple network flags")
 	}
 
 	return cmd.ValidateNoArgs(ctx)
@@ -280,9 +287,7 @@ func startNode(ctx *cli.Context, cancel context.CancelFunc) error {
 		// libp2p specific logging.
 		golog.SetAllLoggers(golog.LevelDebug)
 		// Geth specific logging.
-		glogger := gethlog.NewGlogHandler(gethlog.StreamHandler(os.Stderr, gethlog.TerminalFormat(true)))
-		glogger.Verbosity(gethlog.LvlTrace)
-		gethlog.Root().SetHandler(glogger)
+		gethlog.SetDefault(gethlog.NewLogger(gethlog.NewTerminalHandlerWithLevel(os.Stderr, gethlog.LvlTrace, true)))
 	}
 
 	blockchainFlagOpts, err := blockchaincmd.FlagOptions(ctx)

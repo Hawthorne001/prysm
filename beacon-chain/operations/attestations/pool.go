@@ -18,7 +18,8 @@ type Pool interface {
 	SaveAggregatedAttestation(att ethpb.Att) error
 	SaveAggregatedAttestations(atts []ethpb.Att) error
 	AggregatedAttestations() []ethpb.Att
-	AggregatedAttestationsBySlotIndex(ctx context.Context, slot primitives.Slot, committeeIndex primitives.CommitteeIndex) []ethpb.Att
+	AggregatedAttestationsBySlotIndex(ctx context.Context, slot primitives.Slot, committeeIndex primitives.CommitteeIndex) []*ethpb.Attestation
+	AggregatedAttestationsBySlotIndexElectra(ctx context.Context, slot primitives.Slot, committeeIndex primitives.CommitteeIndex) []*ethpb.AttestationElectra
 	DeleteAggregatedAttestation(att ethpb.Att) error
 	HasAggregatedAttestation(att ethpb.Att) (bool, error)
 	AggregatedAttestationCount() int
@@ -26,7 +27,8 @@ type Pool interface {
 	SaveUnaggregatedAttestation(att ethpb.Att) error
 	SaveUnaggregatedAttestations(atts []ethpb.Att) error
 	UnaggregatedAttestations() ([]ethpb.Att, error)
-	UnaggregatedAttestationsBySlotIndex(ctx context.Context, slot primitives.Slot, committeeIndex primitives.CommitteeIndex) []ethpb.Att
+	UnaggregatedAttestationsBySlotIndex(ctx context.Context, slot primitives.Slot, committeeIndex primitives.CommitteeIndex) []*ethpb.Attestation
+	UnaggregatedAttestationsBySlotIndexElectra(ctx context.Context, slot primitives.Slot, committeeIndex primitives.CommitteeIndex) []*ethpb.AttestationElectra
 	DeleteUnaggregatedAttestation(att ethpb.Att) error
 	DeleteSeenUnaggregatedAttestations() (int, error)
 	UnaggregatedAttestationCount() int
@@ -35,7 +37,6 @@ type Pool interface {
 	BlockAttestations() []ethpb.Att
 	DeleteBlockAttestation(att ethpb.Att) error
 	// For attestations to be passed to fork choice.
-	SaveForkchoiceAttestation(att ethpb.Att) error
 	SaveForkchoiceAttestations(atts []ethpb.Att) error
 	ForkchoiceAttestations() []ethpb.Att
 	DeleteForkchoiceAttestation(att ethpb.Att) error

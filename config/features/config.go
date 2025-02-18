@@ -20,14 +20,15 @@ The process for implementing new features using this package is as follows:
 package features
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli/v2"
-
 	"github.com/prysmaticlabs/prysm/v5/cmd"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
+	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli/v2"
 )
 
 var log = logrus.WithField("prefix", "flags")
@@ -47,6 +48,8 @@ type Flags struct {
 	EnableDoppelGanger                  bool // EnableDoppelGanger enables doppelganger protection on startup for the validator.
 	EnableHistoricalSpaceRepresentation bool // EnableHistoricalSpaceRepresentation enables the saving of registry validators in separate buckets to save space
 	EnableBeaconRESTApi                 bool // EnableBeaconRESTApi enables experimental usage of the beacon REST API by the validator when querying a beacon node
+	DisableCommitteeAwarePacking        bool // DisableCommitteeAwarePacking changes the attestation packing algorithm to one that is not aware of attesting committees.
+	EnableExperimentalAttestationPool   bool // EnableExperimentalAttestationPool enables an experimental attestation pool design.
 	// Logging related toggles.
 	DisableGRPCConnectionLogs bool // Disables logging when a new grpc client has connected.
 	EnableFullSSZDataLogging  bool // Enables logging for full ssz data on rejected gossip messages
@@ -73,9 +76,10 @@ type Flags struct {
 	// BlobSaveFsync requires blob saving to block on fsync to ensure blobs are durably persisted before passing DA.
 	BlobSaveFsync bool
 
-	SaveInvalidBlock           bool // SaveInvalidBlock saves invalid block to temp.
-	SaveInvalidBlob            bool // SaveInvalidBlob saves invalid blob to temp.
-	EIP6110ValidatorIndexCache bool // EIP6110ValidatorIndexCache specifies whether to use the new validator index cache.
+	SaveInvalidBlock bool // SaveInvalidBlock saves invalid block to temp.
+	SaveInvalidBlob  bool // SaveInvalidBlob saves invalid blob to temp.
+
+	EnableDiscoveryReboot bool // EnableDiscoveryReboot allows the node to have its local listener to be rebooted in the event of discovery issues.
 
 	// KeystoreImportDebounceInterval specifies the time duration the validator waits to reload new keys if they have
 	// changed on disk. This feature is for advanced use cases only.
@@ -162,6 +166,7 @@ func applyHoleskyFeatureFlags(ctx *cli.Context) {
 // ConfigureBeaconChain sets the global config based
 // on what flags are enabled for the beacon-chain client.
 func ConfigureBeaconChain(ctx *cli.Context) error {
+	warnDeprecationUpcoming(ctx)
 	complainOnDeprecatedFlags(ctx)
 	cfg := &Flags{}
 	if ctx.Bool(devModeFlag.Name) {
@@ -171,9 +176,10 @@ func ConfigureBeaconChain(ctx *cli.Context) error {
 		return err
 	}
 
-	if ctx.Bool(enableExperimentalState.Name) {
-		logEnabled(enableExperimentalState)
-		cfg.EnableExperimentalState = true
+	cfg.EnableExperimentalState = true
+	if ctx.Bool(disableExperimentalState.Name) {
+		logEnabled(disableExperimentalState)
+		cfg.EnableExperimentalState = false
 	}
 
 	if ctx.Bool(writeSSZStateTransitionsFlag.Name) {
@@ -250,14 +256,22 @@ func ConfigureBeaconChain(ctx *cli.Context) error {
 		logEnabled(BlobSaveFsync)
 		cfg.BlobSaveFsync = true
 	}
-	if ctx.IsSet(EnableQUIC.Name) {
-		logEnabled(EnableQUIC)
-		cfg.EnableQUIC = true
+	cfg.EnableQUIC = true
+	if ctx.IsSet(DisableQUIC.Name) {
+		logDisabled(DisableQUIC)
+		cfg.EnableQUIC = false
 	}
-
-	if ctx.IsSet(eip6110ValidatorCache.Name) {
-		logEnabled(eip6110ValidatorCache)
-		cfg.EIP6110ValidatorIndexCache = true
+	if ctx.IsSet(DisableCommitteeAwarePacking.Name) {
+		logEnabled(DisableCommitteeAwarePacking)
+		cfg.DisableCommitteeAwarePacking = true
+	}
+	if ctx.IsSet(EnableDiscoveryReboot.Name) {
+		logEnabled(EnableDiscoveryReboot)
+		cfg.EnableDiscoveryReboot = true
+	}
+	if ctx.IsSet(enableExperimentalAttestationPool.Name) {
+		logEnabled(enableExperimentalAttestationPool)
+		cfg.EnableExperimentalAttestationPool = true
 	}
 
 	cfg.AggregateIntervals = [3]time.Duration{aggregateFirstInterval.Value, aggregateSecondInterval.Value, aggregateThirdInterval.Value}
@@ -323,6 +337,22 @@ func complainOnDeprecatedFlags(ctx *cli.Context) {
 	}
 }
 
+var upcomingDeprecationExtra = map[string]string{
+	enableHistoricalSpaceRepresentation.Name: "The node needs to be resynced after flag removal.",
+}
+
+func warnDeprecationUpcoming(ctx *cli.Context) {
+	for _, f := range upcomingDeprecation {
+		if ctx.IsSet(f.Names()[0]) {
+			extra := "Please remove this flag from your configuration."
+			if special, ok := upcomingDeprecationExtra[f.Names()[0]]; ok {
+				extra += " " + special
+			}
+			log.Warnf("--%s is pending deprecation and will be removed in the next release. %s", f.Names()[0], extra)
+		}
+	}
+}
+
 func logEnabled(flag cli.DocGenerationFlag) {
 	var name string
 	if names := flag.Names(); len(names) > 0 {
@@ -337,4 +367,26 @@ func logDisabled(flag cli.DocGenerationFlag) {
 		name = names[0]
 	}
 	log.WithField(name, flag.GetUsage()).Warn(disabledFeatureFlag)
+}
+
+// ValidateNetworkFlags validates provided flags and
+// prevents beacon node or validator to start
+// if more than one network flag is provided
+func ValidateNetworkFlags(ctx *cli.Context) error {
+	networkFlagsCount := 0
+	for _, flag := range NetworkFlags {
+		if ctx.IsSet(flag.Names()[0]) {
+			networkFlagsCount++
+			if networkFlagsCount > 1 {
+				// using a forLoop so future addition
+				// doesn't require changes in this function
+				var flagNames []string
+				for _, flag := range NetworkFlags {
+					flagNames = append(flagNames, "--"+flag.Names()[0])
+				}
+				return fmt.Errorf("cannot use more than one network flag at the same time. Possible network flags are: %s", strings.Join(flagNames, ", "))
+			}
+		}
+	}
+	return nil
 }

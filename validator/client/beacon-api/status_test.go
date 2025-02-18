@@ -6,16 +6,15 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/prysmaticlabs/prysm/v5/api/server/structs"
-	"github.com/prysmaticlabs/prysm/v5/validator/client/iface"
-
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/prysmaticlabs/prysm/v5/api/server/structs"
 	"github.com/prysmaticlabs/prysm/v5/config/params"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
 	ethpb "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 	"github.com/prysmaticlabs/prysm/v5/testing/assert"
 	"github.com/prysmaticlabs/prysm/v5/testing/require"
 	"github.com/prysmaticlabs/prysm/v5/validator/client/beacon-api/mock"
+	"github.com/prysmaticlabs/prysm/v5/validator/client/iface"
 	"go.uber.org/mock/gomock"
 )
 
@@ -216,32 +215,23 @@ func TestMultipleValidatorStatus_Nominal(t *testing.T) {
 	assert.DeepEqual(t, &expectedValidatorStatusResponse, actualValidatorStatusResponse)
 }
 
-func TestMultipleValidatorStatus_Error(t *testing.T) {
+func TestMultipleValidatorStatus_No_Keys(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	ctx := context.Background()
 	stateValidatorsProvider := mock.NewMockStateValidatorsProvider(ctrl)
 
-	stateValidatorsProvider.EXPECT().StateValidators(
-		gomock.Any(),
-		gomock.Any(),
-		[]primitives.ValidatorIndex{},
-		nil,
-	).Return(
-		&structs.GetValidatorsResponse{},
-		errors.New("a specific error"),
-	).Times(1)
-
 	validatorClient := beaconApiValidatorClient{stateValidatorsProvider: stateValidatorsProvider}
 
-	_, err := validatorClient.MultipleValidatorStatus(
+	resp, err := validatorClient.MultipleValidatorStatus(
 		ctx,
 		&ethpb.MultipleValidatorStatusRequest{
 			PublicKeys: [][]byte{},
 		},
 	)
-	require.ErrorContains(t, "failed to get validators status response", err)
+	require.NoError(t, err)
+	require.DeepEqual(t, &ethpb.MultipleValidatorStatusResponse{}, resp)
 }
 
 func TestGetValidatorsStatusResponse_Nominal_SomeActiveValidators(t *testing.T) {

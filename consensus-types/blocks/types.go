@@ -5,6 +5,7 @@ import (
 	field_params "github.com/prysmaticlabs/prysm/v5/config/fieldparams"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/interfaces"
 	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
+	enginev1 "github.com/prysmaticlabs/prysm/v5/proto/engine/v1"
 	eth "github.com/prysmaticlabs/prysm/v5/proto/prysm/v1alpha1"
 )
 
@@ -54,11 +55,10 @@ type BeaconBlockBody struct {
 	executionPayloadHeader   interfaces.ExecutionData
 	blsToExecutionChanges    []*eth.SignedBLSToExecutionChange
 	blobKzgCommitments       [][]byte
-	signedConsolidations     []*eth.SignedConsolidation
+	executionRequests        *enginev1.ExecutionRequests
 }
 
 var _ interfaces.ReadOnlyBeaconBlockBody = &BeaconBlockBody{}
-var _ interfaces.ROBlockBodyElectra = &BeaconBlockBody{}
 
 // BeaconBlock is the main beacon block structure. It can represent any block type.
 type BeaconBlock struct {
