@@ -70,6 +70,11 @@ var (
 		Usage:  deprecatedUsage,
 		Hidden: true,
 	}
+	deprecatedPartialDataColumns = &cli.BoolFlag{
+		Name:   "partial-data-columns",
+		Usage:  deprecatedUsage,
+		Hidden: true,
+	}
 )
 
 // Deprecated flags for both the beacon node and validator client.
@@ -95,4 +100,5 @@ var upcomingDeprecation = []cli.Flag{
 var deprecatedBeaconFlags = []cli.Flag{
 	deprecatedDisableLastEpochTargets,
 	deprecatedEnableBuilderSSZ,
+	deprecatedPartialDataColumns,
 }

@@ -383,10 +383,10 @@ var (
 		Usage:  "Disables the engine_getBlobsV2 usage.",
 		Hidden: true,
 	}
-	// PartialDataColumns specifies the regex for enabling partial messages on datacolumns
-	PartialDataColumns = &cli.BoolFlag{
-		Name:  "partial-data-columns",
-		Usage: "Enable cell-level dissemination for PeerDAS data columns",
+	// DisablePartialDataColumns turns off cell-level dissemination for PeerDAS data columns, falling back to full column gossip.
+	DisablePartialDataColumns = &cli.BoolFlag{
+		Name:  "disable-partial-data-columns",
+		Usage: "Disables cell-level dissemination for PeerDAS data columns, falling back to full column gossip.",
 	}
 	// DisableGraffitiClientAppend disables appending consensus and execution client version info to the block graffiti.
 	DisableGraffitiClientAppend = &cli.BoolFlag{
